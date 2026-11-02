@@ -238,6 +238,30 @@ for f in $archives; do
   check  "restored byte-identical $f" test "$(sha256sum < "$f")" = "$signed"
 done
 
+echo "--- trust"
+cp orig-a.png t.png
+cp orig-a.mkv t.mkv
+"$BIN" sign t.png >/dev/null
+"$BIN" sign t.mkv >/dev/null
+"$BIN" --key-dir other keygen >/dev/null
+cp orig-a.png o.png
+"$BIN" --key-dir other sign o.png >/dev/null
+fingerprint=$("$BIN" verify t.png | sed -n 's/^signer: //p')
+refuse "unknown signer fails --require-trust" "$BIN" verify --require-trust t.png
+check  "unknown signer stays intact" "$BIN" verify t.png
+check  "trust a device" "$BIN" trust "$fingerprint"
+check  "trusted device passes" "$BIN" verify --require-trust t.png
+check  "trusted device covers MKV" "$BIN" verify --require-trust t.mkv
+refuse "other device stays unknown" "$BIN" verify --require-trust o.png
+check  "trust an authority" "$BIN" --key-dir list trust other/device-ca.pem
+check  "authority covers its signer" "$BIN" --key-dir list verify --require-trust o.png
+refuse "authority ignores other signers" "$BIN" --key-dir list verify --require-trust t.png
+refuse "trust refuses a bad value" "$BIN" trust not-a-fingerprint
+cp o.png broken.png
+if tamper orig-a.png broken.png; then
+  refuse "trusted signer cannot hide tampering" "$BIN" --key-dir list verify --require-trust broken.png
+fi
+
 echo "--- attacks"
 for f in a.png a.jpg a.mp4 a.mp3 a.mkv $archives; do
   target="attack-$f"
