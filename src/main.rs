@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use significant::{FileKey, keys};
+use significant::{Added, FileKey, Trust, keys};
 
 #[derive(Parser)]
 #[command(version, about = "Sign and verify media files with no sidecar files")]
@@ -29,10 +29,15 @@ enum Command {
     /// Check a file's embedded signature
     Verify {
         file: PathBuf,
-        /// Print the full C2PA report as JSON
+        /// Print the full report as JSON
         #[arg(long)]
         json: bool,
+        /// Fail unless the signer is trusted
+        #[arg(long)]
+        require_trust: bool,
     },
+    /// Trust a device fingerprint, or the authorities in a PEM file
+    Trust { signer: String },
     /// Print the byte ranges the manifest occupies, as "start length"
     Ranges { file: PathBuf },
     /// Remove an embedded signature, saving its manifest next to the file
@@ -70,7 +75,7 @@ fn run() -> Result<ExitCode> {
         Command::Keygen { force } => {
             let dir = key_dir()?;
             let id = keys::generate(&dir, *force)?;
-            println!("device {id}");
+            println!("fingerprint sha256:{id}");
             println!("keys in {}", dir.display());
         }
         Command::Sign { file } => {
@@ -78,35 +83,32 @@ fn run() -> Result<ExitCode> {
             significant::sign(file, Arc::new(key))?;
             println!("signed {}", file.display());
         }
-        Command::Verify { file, json } => {
-            let Some(result) = significant::verify(file)? else {
+        Command::Verify {
+            file,
+            json,
+            require_trust,
+        } => {
+            let trust = match key_dir() {
+                Ok(dir) => Trust::load(&dir)?,
+                Err(_) => Trust::default(),
+            };
+            let Some(result) = significant::verify_with(file, &trust)? else {
                 println!("unsigned");
                 return Ok(ExitCode::from(1));
             };
             if *json {
                 println!("{}", result.report);
             } else {
-                println!(
-                    "content: {}",
-                    if result.intact { "intact" } else { "FAILED" }
-                );
-                println!("signer: {}", result.signer.as_deref().unwrap_or("unknown"));
-                println!(
-                    "identity: {}",
-                    if result.trusted {
-                        "trusted"
-                    } else {
-                        "not checked"
-                    }
-                );
-                for problem in &result.problems {
-                    println!("problem: {problem}");
-                }
+                print_verification(&result);
             }
-            if !result.intact {
+            if !result.intact || (*require_trust && !result.trusted) {
                 return Ok(ExitCode::from(1));
             }
         }
+        Command::Trust { signer } => match Trust::add(&key_dir()?, signer)? {
+            Added::Device => println!("trusted device {signer}"),
+            Added::Authorities(count) => println!("trusted {count} authority certificate(s)"),
+        },
         Command::Ranges { file } => {
             let Some(ranges) = significant::manifest_ranges(file)? else {
                 println!("unsigned");
@@ -140,4 +142,23 @@ fn run() -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn print_verification(result: &significant::Verification) {
+    let content = if result.intact { "intact" } else { "FAILED" };
+    println!("content: {content}");
+    match &result.fingerprint {
+        Some(id) => println!("signer: sha256:{id}"),
+        None => println!("signer: unknown"),
+    }
+    if result.trusted {
+        if let Some(name) = &result.claimed_name {
+            println!("name: {name}");
+        }
+    }
+    let identity = if result.trusted { "trusted" } else { "unknown" };
+    println!("identity: {identity}");
+    for problem in &result.problems {
+        println!("problem: {problem}");
+    }
 }

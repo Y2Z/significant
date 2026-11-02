@@ -18,6 +18,21 @@ MOV, M4A, MP3 and WAV use C2PA's standard embedding through the `c2pa` crate.
 MKV has no C2PA mapping, so `significant` stores the manifest store as a
 Matroska attachment named `significant.c2pa`. Other C2PA tools will not find it.
 
+## Trust
+
+`verify` always shows the signer's fingerprint. Another key cannot reuse it, but it
+only tells you who signed if you know whose it is:
+
+    significant trust sha256:9f3a...     # trust one device
+    significant trust newsroom-ca.pem    # trust a certificate authority
+    significant verify video.mp4         # identity: trusted
+    significant verify --require-trust video.mp4   # fails unless trusted
+
+`keygen` prints a device's fingerprint. A PEM file can also be a published list of
+trusted authorities. The list lives in the key directory.
+
+Trust is about who signed. Whether the content is intact is checked separately.
+
 ## Archives
 
 `significant` also signs ZIP, TAR, `.tar.gz`, `.tgz`, `.tar.xz`, `.txz`, `.tar.zst`
@@ -54,7 +69,8 @@ Early prototype.
   for Android Keystore or the iOS Secure Enclave.
 - A signature shows that a key signed the bytes. It does not prove that a camera
   captured them, or who owns the key.
-- `identity: not checked` is expected, because device keys are self-issued.
+- `identity: unknown` means the signer is not on your trust list.
+- Certificate revocation and trusted timestamps are not checked.
 - Changing the file breaks the signature. Re-encoding does this, and remuxing an MKV also drops the attachment.
 - `unsign` restores the media, but MP3 files may not return byte for byte.
 - Verification covers the media and the signed claims. Some JUMBF box length

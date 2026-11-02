@@ -12,8 +12,10 @@ use serde_json::{Value, json};
 pub mod archive;
 pub mod keys;
 pub mod mkv;
+pub mod trust;
 
 pub use keys::{DeviceKey, FileKey};
+pub use trust::{Added, Trust};
 
 const MKV_MIME: &str = "video/x-matroska";
 const RAW_STORE_MIME: &str = "application/c2pa";
@@ -25,6 +27,7 @@ const DIGITAL_SOURCE_TYPE: &str = "http://c2pa.org/digitalsourcetype/unknown";
 // Self-issued device certificates are not on a trust list, so a strict check
 // straight after signing could reject them. `verify` still validates files.
 const UNTRUSTED_SIGNER: &str = "signingCredential.untrusted";
+const TRUSTED_SIGNER: &str = "signingCredential.trusted";
 // c2pa has no handler for these containers, so it cannot locate the manifest
 // and reports this failure. `verify` performs the location check itself.
 const NO_HANDLER_LOCATION: &str = "data hash exclusion does not match the manifest location";
@@ -63,6 +66,8 @@ pub enum Error {
     KeyExists(PathBuf),
     #[error("key error: {0}")]
     Key(String),
+    #[error("trust error: {0}")]
+    Trust(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -151,9 +156,14 @@ fn file_name(path: &Path) -> Option<&str> {
 pub struct Verification {
     /// True when the content and signature pass validation.
     pub intact: bool,
-    /// True only when the signer chains to a configured trust anchor.
+    /// True when the signer is a trusted device or chains to a trusted
+    /// authority.
     pub trusted: bool,
-    pub signer: Option<String>,
+    /// SHA-256 of the signing certificate. Use this to identify a signer.
+    pub fingerprint: Option<String>,
+    /// Name in the certificate. Anyone can write any name in a certificate,
+    /// so this means nothing unless `trusted` is true.
+    pub claimed_name: Option<String>,
     pub problems: Vec<String>,
     pub report: String,
 }
@@ -211,10 +221,17 @@ fn sign_custom(
     Ok(())
 }
 
-/// Checks `path`. Returns `None` when it carries no manifest.
+/// Checks `path` with nothing trusted. Returns `None` when it carries no
+/// manifest.
 pub fn verify(path: &Path) -> Result<Option<Verification>> {
+    verify_with(path, &Trust::default())
+}
+
+/// Checks `path` against a trust list. Returns `None` when it carries no
+/// manifest.
+pub fn verify_with(path: &Path, trust: &Trust) -> Result<Option<Verification>> {
     let format = media_type(path)?;
-    let context = Context::new().into_shared();
+    let context = verifying_context(trust)?;
     let reader = Reader::from_shared_context(&context);
     let mut file = File::open(path)?;
     let mut expected = None;
@@ -236,6 +253,16 @@ pub fn verify(path: &Path) -> Result<Option<Verification>> {
     let state = format!("{:?}", reader.validation_state());
     let report = reader.json();
     let parsed: Value = serde_json::from_str(&report)?;
+    let fingerprint = reader
+        .active_manifest()
+        .and_then(|manifest| manifest.signature_info())
+        .map(|info| trust::fingerprint(info.cert_chain().as_bytes()))
+        .transpose()?;
+    let trusted = state == "Trusted"
+        || has_success(&parsed, TRUSTED_SIGNER)
+        || fingerprint
+            .as_deref()
+            .is_some_and(|id| trust.has_device(id));
     let mut problems = problems(&parsed);
     problems.retain(|problem| !problem.starts_with(UNTRUSTED_SIGNER));
     let intact = match &expected {
@@ -252,8 +279,9 @@ pub fn verify(path: &Path) -> Result<Option<Verification>> {
 
     Ok(Some(Verification {
         intact,
-        trusted: state == "Trusted",
-        signer: signer(&parsed),
+        trusted,
+        fingerprint,
+        claimed_name: claimed_name(&parsed),
         problems,
         report,
     }))
@@ -457,6 +485,16 @@ fn is_signed(path: &Path) -> Result<bool> {
     }
 }
 
+fn verifying_context(trust: &Trust) -> Result<Arc<Context>> {
+    let Some(authorities) = trust.authorities() else {
+        return Ok(Context::new().into_shared());
+    };
+    let settings = Settings::new().with_toml(&format!(
+        "[[trust.anchors]]\ntrust_kind = \"manifest\"\ntrust_anchors = \'\'\'\n{authorities}\'\'\'\n"
+    ))?;
+    Ok(Context::new().with_settings(settings)?.into_shared())
+}
+
 fn signing_context(key: Arc<dyn DeviceKey>) -> Result<Arc<Context>> {
     let chain = key.certificate_chain_pem().to_vec();
     let callback = move |_context: *const (), data: &[u8]| {
@@ -491,13 +529,17 @@ fn definition(path: &Path, format: &str) -> String {
     .to_string()
 }
 
-fn signer(report: &Value) -> Option<String> {
+fn claimed_name(report: &Value) -> Option<String> {
     let label = report["active_manifest"].as_str()?;
-    let info = &report["manifests"][label]["signature_info"];
-    info["common_name"]
+    report["manifests"][label]["signature_info"]["common_name"]
         .as_str()
-        .or_else(|| info["issuer"].as_str())
         .map(str::to_owned)
+}
+
+fn has_success(report: &Value, code: &str) -> bool {
+    report["validation_results"]["activeManifest"]["success"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item["code"] == code))
 }
 
 fn problems(report: &Value) -> Vec<String> {
@@ -685,6 +727,62 @@ mod tests {
         let (_dir, path) = signed_archive("a.tar.gz", &gz);
         flip(&path, 100);
         assert!(!verify(&path).unwrap().unwrap().intact);
+    }
+
+    fn signed_mkv() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        keys::generate(&keys, false).unwrap();
+        let path = dir.path().join("video.mkv");
+        fs::write(&path, sample_mkv()).unwrap();
+        sign(&path, Arc::new(FileKey::load(&keys).unwrap())).unwrap();
+        (dir, path, keys)
+    }
+
+    #[test]
+    fn fingerprint_ignores_the_certificate_name() {
+        let (_one, first, _) = signed_mkv();
+        let (_two, second, _) = signed_mkv();
+        let first = verify(&first).unwrap().unwrap();
+        let second = verify(&second).unwrap().unwrap();
+        assert_eq!(first.claimed_name, second.claimed_name);
+        assert_ne!(first.fingerprint, second.fingerprint);
+        assert!(first.fingerprint.is_some());
+    }
+
+    #[test]
+    fn unknown_signer_is_intact_but_not_trusted() {
+        let (_dir, path, _) = signed_mkv();
+        let result = verify(&path).unwrap().unwrap();
+        assert!(result.intact && !result.trusted);
+    }
+
+    #[test]
+    fn trusted_device_is_recognized_and_others_are_not() {
+        let (_one, path, _) = signed_mkv();
+        let (_two, other, _) = signed_mkv();
+        let list = tempfile::tempdir().unwrap();
+        let id = verify(&path).unwrap().unwrap().fingerprint.unwrap();
+        assert_eq!(Trust::add(list.path(), &id).unwrap(), Added::Device);
+        let trust = Trust::load(list.path()).unwrap();
+        assert!(verify_with(&path, &trust).unwrap().unwrap().trusted);
+        assert!(!verify_with(&other, &trust).unwrap().unwrap().trusted);
+    }
+
+    #[test]
+    fn trusted_authority_covers_its_signers_only() {
+        let (_one, path, keys) = signed_mkv();
+        let (_two, other, _) = signed_mkv();
+        let list = tempfile::tempdir().unwrap();
+        let authority = keys.join("device-ca.pem");
+        assert_eq!(
+            Trust::add(list.path(), authority.to_str().unwrap()).unwrap(),
+            Added::Authorities(1)
+        );
+        let trust = Trust::load(list.path()).unwrap();
+        let result = verify_with(&path, &trust).unwrap().unwrap();
+        assert!(result.intact && result.trusted, "{:?}", result.problems);
+        assert!(!verify_with(&other, &trust).unwrap().unwrap().trusted);
     }
 
     #[test]

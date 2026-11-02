@@ -2800,6 +2800,7 @@ dependencies = [
  "c2pa",
  "clap",
  "p256",
+ "pem 3.0.6",
  "rcgen",
  "serde_json",
  "sha2 0.10.9",

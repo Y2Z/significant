@@ -18,6 +18,7 @@ path = "src/main.rs"
 anyhow = "1"
 c2pa = { version = "0.91", features = ["file_io"] }
 clap = { version = "4", features = ["derive"] }
+pem = "3"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
 rcgen = "0.13"
 serde_json = "1"

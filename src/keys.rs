@@ -9,13 +9,13 @@ use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyIdMethod, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
 };
-use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 
 use crate::Error;
 
 const LEAF_KEY: &str = "signing-key.pem";
 const CHAIN: &str = "chain.pem";
+const AUTHORITY: &str = "device-ca.pem";
 const VALIDITY_DAYS: i64 = 3650;
 
 /// A P-256 key that can sign but need not reveal its private half.
@@ -64,7 +64,7 @@ pub fn default_key_dir() -> Result<PathBuf, Error> {
     Ok(PathBuf::from(home).join(".config/significant"))
 }
 
-/// Creates a device CA and a leaf certificate. Returns the device ID.
+/// Creates a device CA and a leaf certificate. Returns the device fingerprint.
 pub fn generate(dir: &Path, force: bool) -> Result<String, Error> {
     if dir.join(LEAF_KEY).exists() && !force {
         return Err(Error::KeyExists(dir.to_path_buf()));
@@ -73,14 +73,13 @@ pub fn generate(dir: &Path, force: bool) -> Result<String, Error> {
 
     let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).map_err(key_error)?;
     let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).map_err(key_error)?;
-    let device_id = hex16(&Sha256::digest(leaf_key.public_key_der()));
 
-    let mut ca = params(&format!("significant device CA {device_id}"))?;
+    let mut ca = params("significant device CA")?;
     ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     let ca_cert = ca.self_signed(&ca_key).map_err(key_error)?;
 
-    let mut leaf = params(&format!("significant device {device_id}"))?;
+    let mut leaf = params("significant device")?;
     leaf.is_ca = IsCa::ExplicitNoCa;
     leaf.use_authority_key_identifier_extension = true;
     leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -90,11 +89,10 @@ pub fn generate(dir: &Path, force: bool) -> Result<String, Error> {
         .map_err(key_error)?;
 
     write_private(&dir.join(LEAF_KEY), leaf_key.serialize_pem().as_bytes())?;
-    fs::write(
-        dir.join(CHAIN),
-        format!("{}{}", leaf_cert.pem(), ca_cert.pem()),
-    )?;
-    Ok(device_id)
+    let chain = format!("{}{}", leaf_cert.pem(), ca_cert.pem());
+    fs::write(dir.join(CHAIN), &chain)?;
+    fs::write(dir.join(AUTHORITY), ca_cert.pem())?;
+    crate::trust::fingerprint(chain.as_bytes())
 }
 
 fn params(name: &str) -> Result<CertificateParams, Error> {
@@ -112,10 +110,6 @@ fn params(name: &str) -> Result<CertificateParams, Error> {
 
 fn key_error(error: impl std::fmt::Display) -> Error {
     Error::Key(error.to_string())
-}
-
-fn hex16(bytes: &[u8]) -> String {
-    bytes[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(unix)]
