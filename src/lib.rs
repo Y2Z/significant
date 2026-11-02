@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 pub mod archive;
 pub mod keys;
 pub mod mkv;
+pub mod riff;
 pub mod trust;
 
 pub use keys::{DeviceKey, FileKey};
@@ -46,6 +47,12 @@ pub enum Error {
     Mkv(#[from] mkv::MkvError),
     #[error(transparent)]
     Archive(#[from] archive::ArchiveError),
+    #[error(transparent)]
+    Riff(#[from] riff::RiffError),
+    #[error("{0} can be verified, but this file type cannot be signed or changed")]
+    ReadOnlyFormat(PathBuf),
+    #[error("could not remove the manifest from {0}; the file was not changed")]
+    ManifestNotRemoved(PathBuf),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("unsupported file type: {0}")]
@@ -170,7 +177,7 @@ pub struct Verification {
 
 /// Signs `path` in place. The file changes only if signing succeeds.
 pub fn sign(path: &Path, key: Arc<dyn DeviceKey>) -> Result<()> {
-    let format = media_type(path)?;
+    let format = writable_type(path)?;
     if is_signed(path)? {
         return Err(Error::AlreadySigned(path.to_path_buf()));
     }
@@ -386,7 +393,7 @@ pub fn sidecar_path(path: &Path) -> PathBuf {
 /// so `restore` can put it back. An existing manifest file is kept unless
 /// `overwrite` is set.
 pub fn unsign(path: &Path, manifest_out: Option<&Path>, overwrite: bool) -> Result<bool> {
-    let format = media_type(path)?;
+    let format = writable_type(path)?;
     if !is_signed(path)? {
         return Ok(false);
     }
@@ -406,8 +413,17 @@ pub fn unsign(path: &Path, manifest_out: Option<&Path>, overwrite: bool) -> Resu
         let mut file = File::options().read(true).write(true).open(output.path())?;
         carrier.remove(&mut file)?;
         file.sync_all()?;
+    } else if is_riff(format) {
+        let mut file = File::options().read(true).write(true).open(output.path())?;
+        riff::remove_manifest(&mut file)?;
+        file.sync_all()?;
     } else {
         c2pa::jumbf_io::remove_jumbf_from_file(output.path())?;
+    }
+
+    // A signature left behind could identify someone who asked to remove it.
+    if is_signed(output.path())? {
+        return Err(Error::ManifestNotRemoved(path.to_path_buf()));
     }
     replace(output, path)?;
     Ok(true)
@@ -415,7 +431,7 @@ pub fn unsign(path: &Path, manifest_out: Option<&Path>, overwrite: bool) -> Resu
 
 /// Puts a saved manifest back. `path` changes only if the result verifies.
 pub fn restore(path: &Path, manifest: &Path) -> Result<()> {
-    let format = media_type(path)?;
+    let format = writable_type(path)?;
     if is_signed(path)? {
         return Err(Error::AlreadySigned(path.to_path_buf()));
     }
@@ -444,6 +460,11 @@ pub fn restore(path: &Path, manifest: &Path) -> Result<()> {
             problems: "no manifest found after embedding".to_owned(),
         }),
     }
+}
+
+// c2pa's file removal leaves the manifest in these formats.
+fn is_riff(format: &str) -> bool {
+    matches!(format, "audio/wav" | "video/msvideo" | "image/webp")
 }
 
 fn read_store(path: &Path, format: &str) -> Result<Vec<u8>> {
@@ -557,6 +578,15 @@ fn problems(report: &Value) -> Vec<String> {
         .collect()
 }
 
+/// c2pa reads camera RAW manifests but has no writer for these types.
+fn writable_type(path: &Path) -> Result<&'static str> {
+    let format = media_type(path)?;
+    if matches!(format, "image/x-sony-arw" | "image/x-nikon-nef") {
+        return Err(Error::ReadOnlyFormat(path.to_path_buf()));
+    }
+    Ok(format)
+}
+
 fn media_type(path: &Path) -> Result<&'static str> {
     if let Some((kind, _)) = file_name(path).and_then(archive::Kind::from_name) {
         return Ok(kind.media_type());
@@ -574,6 +604,19 @@ fn media_type(path: &Path) -> Result<&'static str> {
         Some("mp3") => Ok("audio/mpeg"),
         Some("m4a") => Ok("audio/mp4"),
         Some("wav") => Ok("audio/wav"),
+        Some("flac") => Ok("audio/flac"),
+        Some("avi") => Ok("video/msvideo"),
+        Some("heic") => Ok("image/heic"),
+        Some("heif") => Ok("image/heif"),
+        Some("avif") => Ok("image/avif"),
+        Some("webp") => Ok("image/webp"),
+        Some("gif") => Ok("image/gif"),
+        Some("tif" | "tiff") => Ok("image/tiff"),
+        Some("dng") => Ok("image/x-adobe-dng"),
+        Some("arw") => Ok("image/x-sony-arw"),
+        Some("nef") => Ok("image/x-nikon-nef"),
+        Some("jxl") => Ok("image/jxl"),
+        Some("svg") => Ok("image/svg+xml"),
         _ => Err(Error::UnsupportedFormat(path.to_path_buf())),
     }
 }
@@ -783,6 +826,27 @@ mod tests {
         let result = verify_with(&path, &trust).unwrap().unwrap();
         assert!(result.intact && result.trusted, "{:?}", result.problems);
         assert!(!verify_with(&other, &trust).unwrap().unwrap().trusted);
+    }
+
+    #[test]
+    fn camera_raw_is_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        keys::generate(&keys, false).unwrap();
+        for name in ["a.arw", "a.NEF"] {
+            let path = dir.path().join(name);
+            fs::write(&path, b"not really raw").unwrap();
+            let key = Arc::new(FileKey::load(&keys).unwrap());
+            assert!(matches!(sign(&path, key), Err(Error::ReadOnlyFormat(_))));
+            assert!(matches!(
+                unsign(&path, None, false),
+                Err(Error::ReadOnlyFormat(_))
+            ));
+            assert!(matches!(
+                restore(&path, &keys),
+                Err(Error::ReadOnlyFormat(_))
+            ));
+        }
     }
 
     #[test]
