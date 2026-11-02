@@ -1,6 +1,6 @@
 [package]
 name = "significant"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Sign and verify media files in place, with no sidecar files, using C2PA"
