@@ -156,7 +156,11 @@ fn print_verification(result: &significant::Verification) {
             println!("name: {name}");
         }
     }
-    let identity = if result.trusted { "trusted" } else { "unknown" };
+    let identity = match (result.intact, result.trusted) {
+        (false, _) => "not checked, content failed",
+        (true, true) => "trusted",
+        (true, false) => "unknown",
+    };
     println!("identity: {identity}");
     for problem in &result.problems {
         println!("problem: {problem}");
