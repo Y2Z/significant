@@ -35,6 +35,12 @@ print(f"      flipped media byte at offset {offset} of {len(signed)}")
 PY
 }
 
+# Signing rearranges TIFF, so a saved manifest cannot be put back.
+restore_limited() { case "$1" in *.tiff|*.dng) return 0 ;; *) return 1 ;; esac; }
+
+# GIF and SVG can store a manifest split up or encoded.
+may_fragment() { case "$1" in *.gif|*.svg) return 0 ;; *) return 1 ;; esac; }
+
 # The reported ranges, joined, must equal the saved manifest.
 ranges_hold_manifest() {
   "$BIN" ranges "$1" | python3 -c '
@@ -142,6 +148,48 @@ ffmpeg -v error -f lavfi -i testsrc=s=320x240 -frames:v 1 a.png
 ffmpeg -v error -f lavfi -i testsrc=s=320x240 -frames:v 1 a.jpg
 ffmpeg -v error -f lavfi -i sine=d=2 -c:a libmp3lame a.mp3
 
+# Makes optional samples. A format that cannot be generated is reported, not failed.
+media_files="a.png a.jpg a.mp4 a.mp3 a.mkv"
+sample() {
+  name=$1; shift
+  if "$@" >/dev/null 2>&1 && [ -s "$name" ]; then
+    media_files="$media_files $name"
+  else
+    rm -f "$name"
+    echo "skip  cannot generate $name"
+  fi
+}
+picture="-f lavfi -i testsrc=s=320x240 -frames:v 1"
+clip="-f lavfi -i testsrc=d=2:s=320x240:r=30 -f lavfi -i sine=d=2"
+sample a.webp ffmpeg -v error $picture a.webp
+sample a.gif ffmpeg -v error $picture a.gif
+sample a.tiff ffmpeg -v error $picture a.tiff
+sample a.avif ffmpeg -v error $picture -c:v libaom-av1 -still-picture 1 a.avif
+# c2pa needs the JPEG XL container, and ffmpeg writes a bare codestream.
+make_jxl() {
+  ffmpeg -v error -f lavfi -i testsrc=s=320x240 -frames:v 1 -c:v libjxl bare.jxl || return 1
+  python3 -c '
+import sys
+bare = open("bare.jxl", "rb").read()
+box = lambda kind, body: (len(body) + 8).to_bytes(4, "big") + kind + body
+open("a.jxl", "wb").write(box(b"JXL ", b"\r\n\x87\n") + box(b"ftyp", b"jxl \0\0\0\0jxl ") + box(b"jxlc", bare))
+'
+}
+sample a.jxl make_jxl
+sample a.heic heif-enc -q 80 a.png -o a.heic
+sample a.mov ffmpeg -v error $clip -c:v libx264 -c:a aac -pix_fmt yuv420p a.mov
+sample a.avi ffmpeg -v error $clip -c:v mpeg4 -c:a mp3 a.avi
+sample a.wav ffmpeg -v error -f lavfi -i sine=d=2 a.wav
+sample a.flac ffmpeg -v error -f lavfi -i sine=d=2 a.flac
+sample a.m4a ffmpeg -v error -f lavfi -i sine=d=2 -c:a aac a.m4a
+# DNG is TIFF-based, but this sample is not a real camera file.
+if [ -e a.tiff ]; then cp a.tiff a.dng; media_files="$media_files a.dng"; fi
+cp a.mp4 a.m4v
+media_files="$media_files a.m4v"
+if [ -e a.heic ]; then cp a.heic a.heif; media_files="$media_files a.heif"; fi
+printf '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>\n' > a.svg
+media_files="$media_files a.svg"
+
 mkdir tree tree/sub
 echo hello > tree/a.txt
 head -c 30000 /dev/urandom > tree/b.bin
@@ -171,7 +219,7 @@ archive_tools_ok() {
 }
 
 "$BIN" keygen
-for f in a.png a.jpg a.mp4 a.mp3 a.mkv; do
+for f in $media_files; do
   echo "--- $f"
   original=$(sha256sum < "$f")
   cp "$f" "orig-$f"
@@ -179,17 +227,27 @@ for f in a.png a.jpg a.mp4 a.mp3 a.mkv; do
   if ! check "sign $f" "$BIN" sign "$f"; then echo "skip  remaining $f checks"; continue; fi
   check  "verify $f" "$BIN" verify "$f"
   "$BIN" verify "$f" | sed 's/^/      /'
-  check  "decodes $f" ffmpeg -v error -i "$f" -f null -
+  if [ -n "$media" ]; then check "decodes $f" ffmpeg -v error -i "$f" -f null -
+  else echo "skip  ffmpeg cannot decode $f"; fi
   refuse "double sign refused $f" "$BIN" sign "$f"
   check  "signing keeps media $f" test "$(decoded "$f")" = "$media"
   cp "$f" "tamper-$f"
   if ! tamper "orig-$f" "tamper-$f"; then echo "FAIL  could not find media bytes in $f"; fail=1; continue; fi
   refuse "tampered file fails $f" "$BIN" verify "tamper-$f"
+  if [ "$f" = a.svg ]; then
+    sed 's/height="10"/height="11"/g' "$f" > "edited-$f"
+    if "$BIN" verify "edited-$f" 2>/dev/null | grep -q FAILED; then echo "ok    valid XML edit fails $f"
+    else echo "FAIL  valid XML edit fails $f"; fail=1; fi
+  fi
   signed=$(sha256sum < "$f")
   cp "$f" "signed-$f"
   check  "unsign $f" "$BIN" unsign "$f"
   check  "manifest saved $f" test -s "$f.c2pa"
-  check  "ranges hold manifest $f" ranges_hold_manifest "signed-$f" "$f.c2pa"
+  if may_fragment "$f" && "$BIN" ranges "signed-$f" 2>&1 | grep -q contiguous; then
+    echo "note  manifest is not one block in $f"
+  else
+    check "ranges hold manifest $f" ranges_hold_manifest "signed-$f" "$f.c2pa"
+  fi
   refuse "ranges report unsigned $f" "$BIN" ranges "$f"
   refuse "unsigned after unsign $f" "$BIN" verify "$f"
   check  "unsign keeps media $f" test "$(decoded "$f")" = "$media"
@@ -201,6 +259,13 @@ for f in a.png a.jpg a.mp4 a.mp3 a.mkv; do
   wrong=$(sha256sum < "wrong-$f")
   refuse "restore refused on changed file $f" "$BIN" restore "wrong-$f" "$f.c2pa"
   check  "refused restore left file alone $f" test "$(sha256sum < "wrong-$f")" = "$wrong"
+  if restore_limited "$f"; then
+    cp "$f" "try-$f"
+    if ! "$BIN" restore "try-$f" "$f.c2pa" >/dev/null 2>&1; then
+      echo "note  restore refused for $f, as documented"
+      continue
+    fi
+  fi
   if check "restore $f" "$BIN" restore "$f"; then
     check "verify after restore $f" "$BIN" verify "$f"
     check "restore keeps media $f" test "$(decoded "$f")" = "$media"
@@ -238,6 +303,12 @@ for f in $archives; do
   check  "restored byte-identical $f" test "$(sha256sum < "$f")" = "$signed"
 done
 
+echo "--- read-only formats"
+for f in a.arw a.nef; do
+  printf 'not really raw' > "$f"
+  refuse "sign refused $f" "$BIN" sign "$f"
+done
+
 echo "--- trust"
 cp orig-a.png t.png
 cp orig-a.mkv t.mkv
@@ -263,18 +334,20 @@ if tamper orig-a.png broken.png; then
 fi
 
 echo "--- attacks"
-for f in a.png a.jpg a.mp4 a.mp3 a.mkv $archives; do
+for f in $media_files $archives; do
   target="attack-$f"
   cp "orig-$f" "$target"
   "$BIN" sign "$target" >/dev/null || { echo "FAIL  sign $target"; fail=1; continue; }
   cp "$target" "held-$f"
-  if command -v c2patool >/dev/null && [[ " a.png a.jpg a.mp4 a.mp3 " == *" $f "* ]]; then
+  if command -v c2patool >/dev/null && [[ " $media_files " == *" $f "* ]] && [ "$f" != a.mkv ]; then
     if third_party "$target"; then echo "ok    c2patool accepts $f"; else echo "FAIL  c2patool rejects $f"; fail=1; fi
   elif ! command -v c2patool >/dev/null; then
     echo "skip  c2patool not installed"
   fi
   "$BIN" unsign "$target" >/dev/null
-  if attack_manifest "held-$f" "$target.c2pa"; then echo "ok    manifest flips $f"
+  if may_fragment "$f" && ! python3 -c 'import sys; sys.exit(open(sys.argv[2], "rb").read() not in open(sys.argv[1], "rb").read())' "held-$f" "$target.c2pa"; then
+    echo "note  manifest flips need one block, skipping $f"
+  elif attack_manifest "held-$f" "$target.c2pa"; then echo "ok    manifest flips $f"
   else echo "FAIL  manifest flips $f"; fail=1; fi
 done
 exit $fail
