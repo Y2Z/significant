@@ -33,6 +33,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Print the byte ranges the manifest occupies, as "start length"
+    Ranges { file: PathBuf },
     /// Remove an embedded signature, saving its manifest next to the file
     Unsign {
         file: PathBuf,
@@ -103,6 +105,15 @@ fn run() -> Result<ExitCode> {
             }
             if !result.intact {
                 return Ok(ExitCode::from(1));
+            }
+        }
+        Command::Ranges { file } => {
+            let Some(ranges) = significant::manifest_ranges(file)? else {
+                println!("unsigned");
+                return Ok(ExitCode::from(1));
+            };
+            for range in ranges {
+                println!("{} {}", range.start, range.end - range.start);
             }
         }
         Command::Unsign {

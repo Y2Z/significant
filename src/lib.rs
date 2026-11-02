@@ -1,7 +1,7 @@
 //! Sign and verify media files in place, using C2PA where it defines a
 //! format and a `significant` attachment for Matroska.
 use std::fs::{self, File};
-use std::io::{self, Seek as _, Write as _};
+use std::io::{self, Read, Seek as _, Write as _};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,6 +28,8 @@ const UNTRUSTED_SIGNER: &str = "signingCredential.untrusted";
 // this failure. `verify` performs the location check itself for MKV.
 const NO_HANDLER_LOCATION: &str = "data hash exclusion does not match the manifest location";
 
+const SCAN_CHUNK: usize = 1 << 20;
+
 const SIGNING_SETTINGS: &str = "[verify]\nverify_after_sign = false\n";
 
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +50,10 @@ pub enum Error {
     ManifestExists(PathBuf),
     #[error("manifest does not match {path}: {problems}")]
     ManifestMismatch { path: PathBuf, problems: String },
+    #[error("manifest in {0} is not stored as one contiguous block")]
+    ManifestFragmented(PathBuf),
+    #[error("manifest bytes appear more than once in {0}")]
+    ManifestAmbiguous(PathBuf),
     #[error("no signing key in {dir}; run `significant keygen` ({source})")]
     KeyMissing { dir: PathBuf, source: io::Error },
     #[error("a signing key already exists in {0}; use --force to replace it")]
@@ -185,6 +191,68 @@ fn exclusion_is_exactly(detailed: &Value, range: &Range<u64>) -> bool {
     };
     exclusion["start"].as_u64() == Some(range.start)
         && exclusion["length"].as_u64() == Some(range.end - range.start)
+}
+
+/// Returns the byte ranges the manifest occupies, or `None` if there is none.
+///
+/// A hasher can skip these ranges to get a value that ignores the manifest.
+/// The result is not the hash of the original unsigned file: container bytes
+/// around the manifest remain, and signing may also adjust container fields.
+///
+/// The ranges come from the file and are not themselves proof of anything.
+/// Run [`verify`] before relying on them.
+pub fn manifest_ranges(path: &Path) -> Result<Option<Vec<Range<u64>>>> {
+    let format = media_type(path)?;
+    if !is_signed(path)? {
+        return Ok(None);
+    }
+    let mut file = File::open(path)?;
+    if format == MKV_MIME {
+        return Ok(mkv::read_payload(&mut file)?.map(|(_, at)| vec![at.payload]));
+    }
+
+    let store = read_store(path, format)?;
+    let found = find_occurrences(&mut file, &store, 2, SCAN_CHUNK)?;
+    match found.as_slice() {
+        [] => Err(Error::ManifestFragmented(path.to_path_buf())),
+        [start] => Ok(Some(vec![*start..start + store.len() as u64])),
+        _ => Err(Error::ManifestAmbiguous(path.to_path_buf())),
+    }
+}
+
+/// Finds up to `limit` offsets of `needle` without loading the whole file.
+fn find_occurrences<R: Read>(
+    reader: &mut R,
+    needle: &[u8],
+    limit: usize,
+    chunk_size: usize,
+) -> io::Result<Vec<u64>> {
+    let mut found = Vec::new();
+    if needle.is_empty() {
+        return Ok(found);
+    }
+    let mut chunk = vec![0; chunk_size];
+    let mut window = Vec::new();
+    let mut window_start = 0u64;
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(found);
+        }
+        window.extend_from_slice(&chunk[..read]);
+        for (position, candidate) in window.windows(needle.len()).enumerate() {
+            if candidate == needle {
+                found.push(window_start + position as u64);
+                if found.len() == limit {
+                    return Ok(found);
+                }
+            }
+        }
+        // Keep just enough to match across the next chunk boundary.
+        let discard = window.len().saturating_sub(needle.len() - 1);
+        window.drain(..discard);
+        window_start += discard as u64;
+    }
 }
 
 /// Default manifest location: `video.mp4` becomes `video.mp4.c2pa`.
@@ -444,6 +512,34 @@ mod tests {
             "{:?}",
             result.problems
         );
+    }
+
+    #[test]
+    fn occurrences_are_found_across_chunk_boundaries() {
+        let data = b"..abcd..abcd..";
+        for chunk in 1..=data.len() {
+            let found = find_occurrences(&mut &data[..], b"abcd", 2, chunk).unwrap();
+            assert_eq!(found, [2, 8], "chunk size {chunk}");
+        }
+        let found = find_occurrences(&mut &data[..], b"abcd", 1, 4).unwrap();
+        assert_eq!(found, [2]);
+        assert!(
+            find_occurrences(&mut &data[..], b"zz", 2, 4)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mkv_manifest_range_holds_the_manifest() {
+        let (_dir, path, _) = signed_with(honest);
+        let ranges = manifest_ranges(&path).unwrap().unwrap();
+        let [range] = ranges.as_slice() else {
+            panic!("expected one range: {ranges:?}");
+        };
+        let bytes = fs::read(&path).unwrap();
+        let slice = &bytes[range.start as usize..range.end as usize];
+        assert_eq!(slice, read_store(&path, MKV_MIME).unwrap());
     }
 
     #[test]
