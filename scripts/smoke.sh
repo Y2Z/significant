@@ -35,6 +35,17 @@ print(f"      flipped media byte at offset {offset} of {len(signed)}")
 PY
 }
 
+# The reported ranges, joined, must equal the saved manifest.
+ranges_hold_manifest() {
+  "$BIN" ranges "$1" | python3 -c '
+import sys
+data, store = open(sys.argv[1], "rb").read(), open(sys.argv[2], "rb").read()
+spans = [tuple(map(int, line.split())) for line in sys.stdin]
+held = b"".join(data[start:start + length] for start, length in spans)
+sys.exit(not spans or held != store)
+' "$1" "$2"
+}
+
 # Flips every byte of the manifest outside long zero runs, one at a time.
 attack_manifest() {
   python3 - "$BIN" "$1" "$2" <<'PY'
@@ -129,10 +140,11 @@ sys.exit(state == "Invalid" or any(code != "signingCredential.untrusted" for cod
 ffmpeg -v error -f lavfi -i testsrc=d=2:s=320x240:r=30 -f lavfi -i sine=d=2 -c:v libx264 -c:a aac -pix_fmt yuv420p a.mp4
 ffmpeg -v error -f lavfi -i testsrc=d=2:s=320x240:r=30 -f lavfi -i sine=d=2 -c:v libx264 -c:a aac a.mkv
 ffmpeg -v error -f lavfi -i testsrc=s=320x240 -frames:v 1 a.png
+ffmpeg -v error -f lavfi -i testsrc=s=320x240 -frames:v 1 a.jpg
 ffmpeg -v error -f lavfi -i sine=d=2 -c:a libmp3lame a.mp3
 
 "$BIN" keygen
-for f in a.png a.mp4 a.mp3 a.mkv; do
+for f in a.png a.jpg a.mp4 a.mp3 a.mkv; do
   echo "--- $f"
   original=$(sha256sum < "$f")
   cp "$f" "orig-$f"
@@ -147,8 +159,11 @@ for f in a.png a.mp4 a.mp3 a.mkv; do
   if ! tamper "orig-$f" "tamper-$f"; then echo "FAIL  could not find media bytes in $f"; fail=1; continue; fi
   refuse "tampered file fails $f" "$BIN" verify "tamper-$f"
   signed=$(sha256sum < "$f")
+  cp "$f" "signed-$f"
   check  "unsign $f" "$BIN" unsign "$f"
   check  "manifest saved $f" test -s "$f.c2pa"
+  check  "ranges hold manifest $f" ranges_hold_manifest "signed-$f" "$f.c2pa"
+  refuse "ranges report unsigned $f" "$BIN" ranges "$f"
   refuse "unsigned after unsign $f" "$BIN" verify "$f"
   check  "unsign keeps media $f" test "$(decoded "$f")" = "$media"
   if [ "$(sha256sum < "$f")" = "$original" ]; then echo "ok    byte-identical $f"
@@ -175,7 +190,7 @@ for f in a.png a.mp4 a.mp3 a.mkv; do
 done
 
 echo "--- attacks"
-for f in a.png a.mp4 a.mp3 a.mkv; do
+for f in a.png a.jpg a.mp4 a.mp3 a.mkv; do
   target="attack-$f"
   cp "orig-$f" "$target"
   "$BIN" sign "$target" >/dev/null || { echo "FAIL  sign $target"; fail=1; continue; }

@@ -18,6 +18,17 @@ MOV, M4A, MP3 and WAV use C2PA's standard embedding through the `c2pa` crate.
 MKV has no C2PA mapping, so `significant` stores the manifest store as a
 Matroska attachment named `significant.c2pa`. Other C2PA tools will not find it.
 
+## Manifest location
+
+`significant ranges video.mp4` prints each manifest range as `start length`, and
+`significant::manifest_ranges()` returns them in Rust. Hashers can skip those
+bytes to get a value that ignores the manifest.
+
+That value is not the hash of the original file, because container bytes around
+the manifest remain. The ranges are also read from the file, so verify it before
+relying on them. C2PA itself may exclude more bytes than these, and MP4 uses its
+own hashing scheme, so other validators should follow the signed manifest.
+
 ## Status
 
 Early prototype.
