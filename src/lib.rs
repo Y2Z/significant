@@ -9,6 +9,7 @@ use std::sync::Arc;
 use c2pa::{Builder, CallbackSigner, Context, HashRange, Reader, Settings, SigningAlg};
 use serde_json::{Value, json};
 
+pub mod archive;
 pub mod keys;
 pub mod mkv;
 
@@ -24,8 +25,8 @@ const DIGITAL_SOURCE_TYPE: &str = "http://c2pa.org/digitalsourcetype/unknown";
 // Self-issued device certificates are not on a trust list, so a strict check
 // straight after signing could reject them. `verify` still validates files.
 const UNTRUSTED_SIGNER: &str = "signingCredential.untrusted";
-// c2pa has no Matroska handler, so it cannot locate the manifest and reports
-// this failure. `verify` performs the location check itself for MKV.
+// c2pa has no handler for these containers, so it cannot locate the manifest
+// and reports this failure. `verify` performs the location check itself.
 const NO_HANDLER_LOCATION: &str = "data hash exclusion does not match the manifest location";
 
 const SCAN_CHUNK: usize = 1 << 20;
@@ -40,6 +41,8 @@ pub enum Error {
     C2pa(#[from] c2pa::Error),
     #[error(transparent)]
     Mkv(#[from] mkv::MkvError),
+    #[error(transparent)]
+    Archive(#[from] archive::ArchiveError),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("unsupported file type: {0}")]
@@ -63,6 +66,85 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// A format `significant` embeds itself because c2pa has no handler for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Carrier {
+    Mkv,
+    Archive(archive::Kind),
+}
+
+/// Where a carrier put a manifest.
+enum Placement {
+    Mkv(mkv::Embedded),
+    Archive(archive::Embedded),
+}
+
+impl Placement {
+    fn payload(&self) -> Range<u64> {
+        match self {
+            Self::Mkv(at) => at.payload.clone(),
+            Self::Archive(at) => at.payload.clone(),
+        }
+    }
+
+    fn exclusions(&self) -> Vec<Range<u64>> {
+        match self {
+            Self::Mkv(at) => vec![at.payload.clone()],
+            Self::Archive(at) => at.exclusions.clone(),
+        }
+    }
+
+    fn write(&self, file: &mut File, store: &[u8]) -> Result<()> {
+        match self {
+            Self::Mkv(at) => mkv::write_payload(file, at, store)?,
+            Self::Archive(at) => archive::write_payload(file, at, store)?,
+        }
+        Ok(())
+    }
+}
+
+impl Carrier {
+    fn embed(self, file: &mut File, bytes: &[u8]) -> Result<Placement> {
+        Ok(match self {
+            Self::Mkv => Placement::Mkv(mkv::embed_placeholder(file, bytes)?),
+            Self::Archive(kind) => {
+                Placement::Archive(archive::embed_placeholder(kind, file, bytes)?)
+            }
+        })
+    }
+
+    fn read(self, file: &mut File) -> Result<Option<(Vec<u8>, Placement)>> {
+        Ok(match self {
+            Self::Mkv => mkv::read_payload(file)?.map(|(store, at)| (store, Placement::Mkv(at))),
+            Self::Archive(kind) => archive::read_payload(kind, file)?
+                .map(|(store, at)| (store, Placement::Archive(at))),
+        })
+    }
+
+    fn remove(self, file: &mut File) -> Result<()> {
+        match self {
+            Self::Mkv => {
+                mkv::remove(file)?;
+            }
+            Self::Archive(kind) => {
+                archive::remove(kind, file)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn carrier(path: &Path) -> Option<Carrier> {
+    if let Some((kind, _)) = file_name(path).and_then(archive::Kind::from_name) {
+        return Some(Carrier::Archive(kind));
+    }
+    (media_type(path).ok() == Some(MKV_MIME)).then_some(Carrier::Mkv)
+}
+
+fn file_name(path: &Path) -> Option<&str> {
+    path.file_name().and_then(|name| name.to_str())
+}
 
 /// Outcome of `verify`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,15 +170,10 @@ pub fn sign(path: &Path, key: Arc<dyn DeviceKey>) -> Result<()> {
     let dir = parent(path);
     let output = tempfile::NamedTempFile::new_in(dir)?;
 
-    if format == MKV_MIME {
+    if let Some(carrier) = carrier(path) {
         fs::copy(path, output.path())?;
         let mut file = File::options().read(true).write(true).open(output.path())?;
-        sign_mkv(&mut builder, &mut file, |manifest| {
-            vec![HashRange::new(
-                manifest.start,
-                manifest.end - manifest.start,
-            )]
-        })?;
+        sign_custom(&mut builder, carrier, format, &mut file, hash_ranges)?;
     } else {
         let mut source = File::open(path)?;
         let mut target = File::options().read(true).write(true).open(output.path())?;
@@ -106,20 +183,30 @@ pub fn sign(path: &Path, key: Arc<dyn DeviceKey>) -> Result<()> {
     replace(output, path)
 }
 
-/// Embeds a signed manifest. `exclusions` maps the manifest's location to the
-/// ranges left out of the hash.
-fn sign_mkv(
+fn hash_ranges(ranges: &[Range<u64>]) -> Vec<HashRange> {
+    ranges
+        .iter()
+        .map(|range| HashRange::new(range.start, range.end - range.start))
+        .collect()
+}
+
+/// Embeds a signed manifest in a format without a c2pa handler. `exclusions`
+/// maps the bytes that depend on the manifest to the ranges left out of the
+/// hash.
+fn sign_custom(
     builder: &mut Builder,
+    carrier: Carrier,
+    format: &str,
     file: &mut File,
-    exclusions: impl Fn(&Range<u64>) -> Vec<HashRange>,
+    exclusions: impl Fn(&[Range<u64>]) -> Vec<HashRange>,
 ) -> Result<()> {
     let placeholder = builder.placeholder(RAW_STORE_MIME)?;
-    let at = mkv::embed_placeholder(file, &placeholder)?;
-    builder.set_data_hash_exclusions(exclusions(&at.payload))?;
+    let at = carrier.embed(file, &placeholder)?;
+    builder.set_data_hash_exclusions(exclusions(&at.exclusions()))?;
     file.rewind()?;
-    builder.update_hash_from_stream(MKV_MIME, &mut *file)?;
+    builder.update_hash_from_stream(format, &mut *file)?;
     let store = builder.sign_embeddable(RAW_STORE_MIME)?;
-    mkv::write_payload(file, &at, &store)?;
+    at.write(file, &store)?;
     file.sync_all()?;
     Ok(())
 }
@@ -130,14 +217,14 @@ pub fn verify(path: &Path) -> Result<Option<Verification>> {
     let context = Context::new().into_shared();
     let reader = Reader::from_shared_context(&context);
     let mut file = File::open(path)?;
-    let mut manifest_range = None;
-    let reader = if format == MKV_MIME {
-        let Some((store, at)) = mkv::read_payload(&mut file)? else {
+    let mut expected = None;
+    let reader = if let Some(carrier) = carrier(path) {
+        let Some((store, at)) = carrier.read(&mut file)? else {
             return Ok(None);
         };
-        manifest_range = Some(at.payload);
+        expected = Some(at.exclusions());
         file.rewind()?;
-        reader.with_manifest_data_and_stream(&store, MKV_MIME, &mut file)?
+        reader.with_manifest_data_and_stream(&store, format, &mut file)?
     } else {
         match reader.with_stream(format, &mut file) {
             Ok(reader) => reader,
@@ -151,13 +238,13 @@ pub fn verify(path: &Path) -> Result<Option<Verification>> {
     let parsed: Value = serde_json::from_str(&report)?;
     let mut problems = problems(&parsed);
     problems.retain(|problem| !problem.starts_with(UNTRUSTED_SIGNER));
-    let intact = match &manifest_range {
+    let intact = match &expected {
         None => state != "Invalid",
-        Some(range) => {
+        Some(ranges) => {
             problems.retain(|problem| !problem.contains(NO_HANDLER_LOCATION));
             let detailed: Value = serde_json::from_str(&reader.detailed_json())?;
-            if !exclusion_is_exactly(&detailed, range) {
-                problems.push("hash exclusion is not exactly the manifest attachment".to_owned());
+            if !exclusions_are_exactly(&detailed, ranges) {
+                problems.push("hash exclusion is not exactly the manifest location".to_owned());
             }
             problems.is_empty()
         }
@@ -173,7 +260,7 @@ pub fn verify(path: &Path) -> Result<Option<Verification>> {
 }
 
 /// A signed exclusion wider than the manifest would leave content unprotected.
-fn exclusion_is_exactly(detailed: &Value, range: &Range<u64>) -> bool {
+fn exclusions_are_exactly(detailed: &Value, expected: &[Range<u64>]) -> bool {
     let Some(label) = detailed["active_manifest"].as_str() else {
         return false;
     };
@@ -186,11 +273,14 @@ fn exclusion_is_exactly(detailed: &Value, range: &Range<u64>) -> bool {
     let (Some((_, hash)), None) = (hashes.next(), hashes.next()) else {
         return false;
     };
-    let Some([exclusion]) = hash["exclusions"].as_array().map(Vec::as_slice) else {
+    let Some(exclusions) = hash["exclusions"].as_array() else {
         return false;
     };
-    exclusion["start"].as_u64() == Some(range.start)
-        && exclusion["length"].as_u64() == Some(range.end - range.start)
+    exclusions.len() == expected.len()
+        && exclusions.iter().zip(expected).all(|(exclusion, range)| {
+            exclusion["start"].as_u64() == Some(range.start)
+                && exclusion["length"].as_u64() == Some(range.end - range.start)
+        })
 }
 
 /// Returns the byte ranges the manifest occupies, or `None` if there is none.
@@ -207,8 +297,8 @@ pub fn manifest_ranges(path: &Path) -> Result<Option<Vec<Range<u64>>>> {
         return Ok(None);
     }
     let mut file = File::open(path)?;
-    if format == MKV_MIME {
-        return Ok(mkv::read_payload(&mut file)?.map(|(_, at)| vec![at.payload]));
+    if let Some(carrier) = carrier(path) {
+        return Ok(carrier.read(&mut file)?.map(|(_, at)| vec![at.payload()]));
     }
 
     let store = read_store(path, format)?;
@@ -284,9 +374,9 @@ pub fn unsign(path: &Path, manifest_out: Option<&Path>, overwrite: bool) -> Resu
 
     let output = temp_beside(path)?;
     fs::copy(path, output.path())?;
-    if format == MKV_MIME {
+    if let Some(carrier) = carrier(path) {
         let mut file = File::options().read(true).write(true).open(output.path())?;
-        mkv::remove(&mut file)?;
+        carrier.remove(&mut file)?;
         file.sync_all()?;
     } else {
         c2pa::jumbf_io::remove_jumbf_from_file(output.path())?;
@@ -303,10 +393,10 @@ pub fn restore(path: &Path, manifest: &Path) -> Result<()> {
     }
     let store = fs::read(manifest)?;
     let output = temp_beside(path)?;
-    if format == MKV_MIME {
+    if let Some(carrier) = carrier(path) {
         fs::copy(path, output.path())?;
         let mut file = File::options().read(true).write(true).open(output.path())?;
-        mkv::embed_placeholder(&mut file, &store)?;
+        carrier.embed(&mut file, &store)?;
         file.sync_all()?;
     } else {
         let mut source = File::open(path)?;
@@ -330,8 +420,9 @@ pub fn restore(path: &Path, manifest: &Path) -> Result<()> {
 
 fn read_store(path: &Path, format: &str) -> Result<Vec<u8>> {
     let mut file = File::open(path)?;
-    if format == MKV_MIME {
-        return Ok(mkv::read_payload(&mut file)?
+    if let Some(carrier) = carrier(path) {
+        return Ok(carrier
+            .read(&mut file)?
             .ok_or(c2pa::Error::JumbfNotFound)?
             .0);
     }
@@ -340,10 +431,13 @@ fn read_store(path: &Path, format: &str) -> Result<Vec<u8>> {
 
 /// c2pa picks its handler from the extension, so the copy keeps it.
 fn temp_beside(path: &Path) -> Result<tempfile::NamedTempFile> {
-    let suffix = format!(
-        ".{}",
-        path.extension().unwrap_or_default().to_string_lossy()
-    );
+    let suffix = match file_name(path).and_then(archive::Kind::from_name) {
+        Some((_, suffix)) => suffix.to_owned(),
+        None => format!(
+            ".{}",
+            path.extension().unwrap_or_default().to_string_lossy()
+        ),
+    };
     Ok(tempfile::Builder::new()
         .suffix(&suffix)
         .tempfile_in(parent(path))?)
@@ -352,8 +446,8 @@ fn temp_beside(path: &Path) -> Result<tempfile::NamedTempFile> {
 fn is_signed(path: &Path) -> Result<bool> {
     let format = media_type(path)?;
     let mut file = File::open(path)?;
-    if format == MKV_MIME {
-        return Ok(mkv::read_payload(&mut file)?.is_some());
+    if let Some(carrier) = carrier(path) {
+        return Ok(carrier.read(&mut file)?.is_some());
     }
     let context = Context::new().into_shared();
     match Reader::from_shared_context(&context).with_stream(format, &mut file) {
@@ -422,6 +516,9 @@ fn problems(report: &Value) -> Vec<String> {
 }
 
 fn media_type(path: &Path) -> Result<&'static str> {
+    if let Some((kind, _)) = file_name(path).and_then(archive::Kind::from_name) {
+        return Ok(kind.media_type());
+    }
     let extension = path
         .extension()
         .and_then(|e| e.to_str())
@@ -477,6 +574,7 @@ mod tests {
     fn signed_with(
         exclusions: impl Fn(&Range<u64>) -> Vec<HashRange>,
     ) -> (tempfile::TempDir, PathBuf, u64) {
+        let exclusions = move |ranges: &[Range<u64>]| exclusions(&ranges[0]);
         let dir = tempfile::tempdir().unwrap();
         let keys = dir.path().join("keys");
         keys::generate(&keys, false).unwrap();
@@ -490,7 +588,7 @@ mod tests {
             .with_definition(definition(&path, MKV_MIME))
             .unwrap();
         let mut file = File::options().read(true).write(true).open(&path).unwrap();
-        sign_mkv(&mut builder, &mut file, exclusions).unwrap();
+        sign_custom(&mut builder, Carrier::Mkv, MKV_MIME, &mut file, exclusions).unwrap();
         (dir, path, original.len() as u64 - 100)
     }
 
@@ -540,6 +638,53 @@ mod tests {
         let bytes = fs::read(&path).unwrap();
         let slice = &bytes[range.start as usize..range.end as usize];
         assert_eq!(slice, read_store(&path, MKV_MIME).unwrap());
+    }
+
+    fn empty_zip() -> Vec<u8> {
+        let mut eocd = b"PK\x05\x06".to_vec();
+        eocd.resize(22, 0);
+        eocd
+    }
+
+    fn signed_archive(name: &str, contents: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        keys::generate(&keys, false).unwrap();
+        let key = FileKey::load(&keys).unwrap();
+        let path = dir.path().join(name);
+        fs::write(&path, contents).unwrap();
+        sign(&path, Arc::new(key)).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn archives_verify_and_unsign_exactly() {
+        let mut gz = b"\x1F\x8B".to_vec();
+        gz.extend_from_slice(&[7; 900]);
+        let cases: [(&str, Vec<u8>); 3] = [
+            ("a.zip", empty_zip()),
+            ("a.tar", vec![0; 2048]),
+            ("a.tar.gz", gz),
+        ];
+        for (name, original) in cases {
+            let (_dir, path) = signed_archive(name, &original);
+            let result = verify(&path).unwrap().unwrap();
+            assert!(result.intact, "{name}: {:?}", result.problems);
+            let sidecar = sidecar_path(&path);
+            assert!(unsign(&path, Some(&sidecar), false).unwrap());
+            assert_eq!(fs::read(&path).unwrap(), original, "{name}");
+            restore(&path, &sidecar).unwrap();
+            assert!(verify(&path).unwrap().unwrap().intact, "{name}");
+        }
+    }
+
+    #[test]
+    fn archive_change_outside_the_manifest_fails() {
+        let mut gz = b"\x1F\x8B".to_vec();
+        gz.extend_from_slice(&[7; 900]);
+        let (_dir, path) = signed_archive("a.tar.gz", &gz);
+        flip(&path, 100);
+        assert!(!verify(&path).unwrap().unwrap().intact);
     }
 
     #[test]

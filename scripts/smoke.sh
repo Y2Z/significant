@@ -66,11 +66,10 @@ for byte, run in itertools.groupby(store):
         positions.extend(range(offset, offset + length))
     offset += length
 
-root, extension = os.path.splitext(signed_path)
 def undetected(position):
     data = bytearray(signed)
     data[start + position] ^= 0xFF
-    path = f"{root}-flip{position}{extension}"
+    path = f"flip{position}-{signed_path}"
     with open(path, "wb") as file:
         file.write(data)
     result = subprocess.run([binary, "verify", path], capture_output=True)
@@ -109,7 +108,7 @@ failed = False
 for position in missed:
     data = bytearray(signed)
     data[start + position] ^= 0xFF
-    path = f"{root}-flip{position}{extension}"
+    path = f"flip{position}-{signed_path}"
     with open(path, "wb") as file:
         file.write(data)
     result = report(path)
@@ -142,6 +141,34 @@ ffmpeg -v error -f lavfi -i testsrc=d=2:s=320x240:r=30 -f lavfi -i sine=d=2 -c:v
 ffmpeg -v error -f lavfi -i testsrc=s=320x240 -frames:v 1 a.png
 ffmpeg -v error -f lavfi -i testsrc=s=320x240 -frames:v 1 a.jpg
 ffmpeg -v error -f lavfi -i sine=d=2 -c:a libmp3lame a.mp3
+
+mkdir tree tree/sub
+echo hello > tree/a.txt
+head -c 30000 /dev/urandom > tree/b.bin
+echo nested > tree/sub/c.txt
+zip -qr a.zip tree
+tar cf a.tar tree
+gzip -c a.tar > a.tar.gz
+gzip -c a.tar > a.tgz
+xz -c a.tar > a.tar.xz
+archives="a.zip a.tar a.tar.gz a.tgz a.tar.xz"
+if command -v zstd >/dev/null; then
+  zstd -q -c a.tar > a.tar.zst
+  archives="$archives a.tar.zst"
+else
+  echo "skip  zstd not installed"
+fi
+
+# Lists an archive's names and checks that it extracts to the original tree.
+archive_tools_ok() {
+  rm -rf extracted && mkdir extracted
+  case "$1" in
+    *.zip) unzip -tq "$1" >/dev/null && unzip -qo "$1" -d extracted || return 1
+           rm -rf extracted/META-INF ;;
+    *) tar xf "$1" -C extracted || return 1 ;;
+  esac
+  diff -r tree extracted/tree
+}
 
 "$BIN" keygen
 for f in a.png a.jpg a.mp4 a.mp3 a.mkv; do
@@ -189,15 +216,37 @@ for f in a.png a.jpg a.mp4 a.mp3 a.mkv; do
   fi
 done
 
+for f in $archives; do
+  echo "--- $f"
+  original=$(sha256sum < "$f")
+  cp "$f" "orig-$f"
+  if ! check "sign $f" "$BIN" sign "$f"; then echo "skip  remaining $f checks"; continue; fi
+  check  "verify $f" "$BIN" verify "$f"
+  "$BIN" verify "$f" | sed 's/^/      /'
+  check  "tools accept signed $f" archive_tools_ok "$f"
+  refuse "double sign refused $f" "$BIN" sign "$f"
+  cp "$f" "tamper-$f"
+  if tamper "orig-$f" "tamper-$f"; then refuse "tampered file fails $f" "$BIN" verify "tamper-$f"
+  else echo "FAIL  could not find archive bytes in $f"; fail=1; fi
+  signed=$(sha256sum < "$f")
+  cp "$f" "signed-$f"
+  check  "unsign $f" "$BIN" unsign "$f"
+  check  "ranges hold manifest $f" ranges_hold_manifest "signed-$f" "$f.c2pa"
+  check  "byte-identical $f" test "$(sha256sum < "$f")" = "$original"
+  check  "restore $f" "$BIN" restore "$f"
+  check  "verify after restore $f" "$BIN" verify "$f"
+  check  "restored byte-identical $f" test "$(sha256sum < "$f")" = "$signed"
+done
+
 echo "--- attacks"
-for f in a.png a.jpg a.mp4 a.mp3 a.mkv; do
+for f in a.png a.jpg a.mp4 a.mp3 a.mkv $archives; do
   target="attack-$f"
   cp "orig-$f" "$target"
   "$BIN" sign "$target" >/dev/null || { echo "FAIL  sign $target"; fail=1; continue; }
   cp "$target" "held-$f"
-  if command -v c2patool >/dev/null && [ "$f" != a.mkv ]; then
+  if command -v c2patool >/dev/null && [[ " a.png a.jpg a.mp4 a.mp3 " == *" $f "* ]]; then
     if third_party "$target"; then echo "ok    c2patool accepts $f"; else echo "FAIL  c2patool rejects $f"; fail=1; fi
-  elif [ "$f" != a.mkv ]; then
+  elif ! command -v c2patool >/dev/null; then
     echo "skip  c2patool not installed"
   fi
   "$BIN" unsign "$target" >/dev/null
