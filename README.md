@@ -18,6 +18,22 @@ MOV, M4A, MP3 and WAV use C2PA's standard embedding through the `c2pa` crate.
 MKV has no C2PA mapping, so `significant` stores the manifest store as a
 Matroska attachment named `significant.c2pa`. Other C2PA tools will not find it.
 
+## Archives
+
+`significant` also signs ZIP, TAR, `.tar.gz`, `.tgz`, `.tar.xz`, `.txz`, `.tar.zst`
+and `.tzst` files. Nothing is unpacked or recompressed.
+
+ZIP stores the manifest as a `META-INF/content_credential.c2pa` entry, the location
+C2PA defines, so it extracts as a normal file. It does not yet use C2PA's collection
+hash for ZIP, so other C2PA tools may not validate it.
+
+TAR flavors append a small frame after the archive, and `tar` stops before it. This
+format is specific to `significant`. Decompressing a `.tar.gz` or `.tar.xz` on its own
+keeps the manifest bytes after the end of the TAR data.
+
+Changing, re-zipping or recompressing an archive breaks the signature, even if the
+files inside are identical. `.tar.bz2` is not supported yet.
+
 ## Manifest location
 
 `significant ranges video.mp4` prints each manifest range as `start length`, and
