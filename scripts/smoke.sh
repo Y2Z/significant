@@ -331,6 +331,8 @@ refuse "trust refuses a bad value" "$BIN" trust not-a-fingerprint
 cp o.png broken.png
 if tamper orig-a.png broken.png; then
   refuse "trusted signer cannot hide tampering" "$BIN" --key-dir list verify --require-trust broken.png
+  if "$BIN" --key-dir list verify broken.png | grep -q 'identity: not checked'; then echo "ok    tampered file shows no identity"
+  else echo "FAIL  tampered file shows no identity"; fail=1; fi
 fi
 
 echo "--- attacks"

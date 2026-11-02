@@ -163,8 +163,8 @@ fn file_name(path: &Path) -> Option<&str> {
 pub struct Verification {
     /// True when the content and signature pass validation.
     pub intact: bool,
-    /// True when the signer is a trusted device or chains to a trusted
-    /// authority.
+    /// True when the content is intact and the signer is a trusted device or
+    /// chains to a trusted authority. Always false for a file that failed.
     pub trusted: bool,
     /// SHA-256 of the signing certificate. Use this to identify a signer.
     pub fingerprint: Option<String>,
@@ -286,7 +286,7 @@ pub fn verify_with(path: &Path, trust: &Trust) -> Result<Option<Verification>> {
 
     Ok(Some(Verification {
         intact,
-        trusted,
+        trusted: trusted && intact,
         fingerprint,
         claimed_name: claimed_name(&parsed),
         problems,
@@ -847,6 +847,18 @@ mod tests {
                 Err(Error::ReadOnlyFormat(_))
             ));
         }
+    }
+
+    #[test]
+    fn tampered_file_is_never_trusted() {
+        let (_dir, path, _) = signed_mkv();
+        let list = tempfile::tempdir().unwrap();
+        let id = verify(&path).unwrap().unwrap().fingerprint.unwrap();
+        Trust::add(list.path(), &id).unwrap();
+        flip(&path, 100);
+        let trust = Trust::load(list.path()).unwrap();
+        let result = verify_with(&path, &trust).unwrap().unwrap();
+        assert!(!result.intact && !result.trusted);
     }
 
     #[test]
