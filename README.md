@@ -26,6 +26,15 @@ Sony ARW and Nikon NEF files can only be verified. `c2pa` does not write them, s
 MKV has no C2PA mapping, so `significant` stores the manifest store as a
 Matroska attachment named `significant.c2pa`. Other C2PA tools will not find it.
 
+## Key location
+
+Keys and the trust list live in one folder, which is worth backing up:
+
+- Linux and macOS: `$XDG_CONFIG_HOME/significant`, or `~/.config/significant`
+- Windows: `%APPDATA%\significant`
+
+Set `SIGNIFICANT_HOME` to use another folder, or pass `--key-dir` for one command.
+
 ## Trust
 
 `verify` always shows the signer's fingerprint. Another key cannot reuse it, but it

@@ -77,12 +77,12 @@ impl DeviceKey for FileKey {
     }
 }
 
+/// The default key directory: `$SIGNIFICANT_HOME`, or else
+/// `$XDG_CONFIG_HOME/significant` or `~/.config/significant` on Linux and macOS,
+/// and `%APPDATA%\significant` on Windows.
 pub fn default_key_dir() -> Result<PathBuf, Error> {
-    if let Some(dir) = std::env::var_os("SIGNIFICANT_HOME") {
-        return Ok(dir.into());
-    }
-    let home = std::env::var_os("HOME").ok_or_else(|| Error::Key("HOME is not set".into()))?;
-    Ok(PathBuf::from(home).join(".config/significant"))
+    crate::paths::key_dir(|name| std::env::var_os(name), cfg!(windows))
+        .ok_or_else(|| Error::Key("cannot find a home directory; set SIGNIFICANT_HOME".into()))
 }
 
 /// Creates a device CA and a leaf certificate. Returns the device fingerprint.

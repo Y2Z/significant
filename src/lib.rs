@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 pub mod archive;
 pub mod keys;
 pub mod mkv;
+mod paths;
 pub mod riff;
 pub mod trust;
 

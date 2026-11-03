@@ -9,7 +9,7 @@ use significant::{Added, FileKey, Trust, keys};
 #[derive(Parser)]
 #[command(version, about = "Sign and verify media files with no sidecar files")]
 struct Cli {
-    /// Key directory. Defaults to $SIGNIFICANT_HOME or ~/.config/significant.
+    /// Key directory. Defaults to $SIGNIFICANT_HOME, or a per-user folder.
     #[arg(long, global = true)]
     key_dir: Option<PathBuf>,
     #[command(subcommand)]
