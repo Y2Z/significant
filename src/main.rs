@@ -18,7 +18,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create a development device key
+    /// Create a signing key. `sign` does this for you on first use
     Keygen {
         /// Replace an existing key
         #[arg(long)]
@@ -79,7 +79,15 @@ fn run() -> Result<ExitCode> {
             println!("keys in {}", dir.display());
         }
         Command::Sign { file } => {
-            let key = FileKey::load(&key_dir()?)?;
+            let dir = key_dir()?;
+            let (key, created) = FileKey::load_or_create(&dir)?;
+            if let Some(id) = created {
+                eprintln!("created signing key: sha256:{id}");
+                eprintln!(
+                    "stored in {}; back it up to keep this identity",
+                    dir.display()
+                );
+            }
             significant::sign(file, Arc::new(key))?;
             println!("signed {}", file.display());
         }

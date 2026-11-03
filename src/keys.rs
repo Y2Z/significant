@@ -16,6 +16,7 @@ use crate::Error;
 const LEAF_KEY: &str = "signing-key.pem";
 const CHAIN: &str = "chain.pem";
 const AUTHORITY: &str = "device-ca.pem";
+const LOCK: &str = ".key.lock";
 const VALIDITY_DAYS: i64 = 3650;
 
 /// A P-256 key that can sign but need not reveal its private half.
@@ -42,6 +43,26 @@ impl FileKey {
         let key = SigningKey::from_pkcs8_pem(&pem).map_err(|e| Error::Key(e.to_string()))?;
         let chain = fs::read(dir.join(CHAIN))?;
         Ok(Self { key, chain })
+    }
+
+    /// Loads the key in `dir`, creating one if there is none. Also returns the
+    /// new fingerprint when a key was created.
+    ///
+    /// Processes starting at the same time all end up with the same key. The
+    /// lock is released by the operating system, even after a crash.
+    pub fn load_or_create(dir: &Path) -> Result<(Self, Option<String>), Error> {
+        fs::create_dir_all(dir)?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(LOCK))?;
+        lock.lock()?;
+        if dir.join(LEAF_KEY).exists() {
+            return Ok((Self::load(dir)?, None));
+        }
+        let fingerprint = generate(dir, false)?;
+        Ok((Self::load(dir)?, Some(fingerprint)))
     }
 }
 
@@ -88,10 +109,11 @@ pub fn generate(dir: &Path, force: bool) -> Result<String, Error> {
         .signed_by(&leaf_key, &ca_cert, &ca_key)
         .map_err(key_error)?;
 
-    write_private(&dir.join(LEAF_KEY), leaf_key.serialize_pem().as_bytes())?;
+    // The key is written last, so its presence means the set is complete.
     let chain = format!("{}{}", leaf_cert.pem(), ca_cert.pem());
     fs::write(dir.join(CHAIN), &chain)?;
     fs::write(dir.join(AUTHORITY), ca_cert.pem())?;
+    write_private(&dir.join(LEAF_KEY), leaf_key.serialize_pem().as_bytes())?;
     crate::trust::fingerprint(chain.as_bytes())
 }
 
@@ -130,4 +152,43 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     fs::write(path, bytes)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_use_creates_a_key_and_later_uses_load_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("nested/keys");
+        let (first, created) = FileKey::load_or_create(&keys).unwrap();
+        assert!(created.is_some());
+        let (second, created) = FileKey::load_or_create(&keys).unwrap();
+        assert!(created.is_none());
+        assert_eq!(
+            first.certificate_chain_pem(),
+            second.certificate_chain_pem()
+        );
+    }
+
+    #[test]
+    fn parallel_first_uses_share_one_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let keys = dir.path().join("keys");
+                std::thread::spawn(move || FileKey::load_or_create(&keys).unwrap())
+            })
+            .collect();
+        let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let created = results.iter().filter(|(_, new)| new.is_some()).count();
+        assert_eq!(created, 1);
+        let chain = results[0].0.certificate_chain_pem();
+        assert!(
+            results
+                .iter()
+                .all(|(key, _)| key.certificate_chain_pem() == chain)
+        );
+    }
 }

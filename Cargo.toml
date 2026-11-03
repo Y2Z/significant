@@ -2,7 +2,7 @@
 name = "significant"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Sign and verify media files in place, with no sidecar files, using C2PA"
 readme = "README.md"
 license = "0BSD"
