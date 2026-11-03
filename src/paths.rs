@@ -54,8 +54,13 @@ mod tests {
 
     #[test]
     fn unix_prefers_xdg_then_home() {
-        let both = [("HOME", "/home/a"), ("XDG_CONFIG_HOME", "/xdg")];
-        assert_eq!(resolve(&both, false), Some("/xdg/significant".into()));
+        // What counts as absolute depends on the platform running the test.
+        let xdg = std::env::temp_dir();
+        let both = [
+            ("HOME", "/home/a"),
+            ("XDG_CONFIG_HOME", xdg.to_str().unwrap()),
+        ];
+        assert_eq!(resolve(&both, false), Some(xdg.join("significant")));
         let home = [("HOME", "/home/a")];
         assert_eq!(
             resolve(&home, false),
