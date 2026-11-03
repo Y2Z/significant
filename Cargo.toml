@@ -1,9 +1,11 @@
 [package]
 name = "significant"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
-description = "Sign and verify media files in place, with no sidecar files, using C2PA"
+description = "Sign and verify files using C2PA (with no sidecar files)"
+homepage = "https://github.com/Y2Z/significant"
+repository = "https://github.com/Y2Z/significant"
 readme = "README.md"
 license = "0BSD"
 
