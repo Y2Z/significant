@@ -218,7 +218,16 @@ archive_tools_ok() {
   diff -r tree extracted/tree
 }
 
-"$BIN" keygen
+# The first sign creates the key, with no keygen step.
+cp a.png first.png
+if "$BIN" sign first.png 2>&1 | grep -q 'created signing key'; then echo "ok    first sign creates a key"
+else echo "FAIL  first sign creates a key"; fail=1; fi
+cp a.png second.png
+if "$BIN" sign second.png 2>&1 | grep -q 'created signing key'; then echo "FAIL  second sign reuses the key"; fail=1
+else echo "ok    second sign reuses the key"; fi
+if [ "$("$BIN" verify first.png | grep signer)" = "$("$BIN" verify second.png | grep signer)" ]; then echo "ok    both files share a signer"
+else echo "FAIL  both files share a signer"; fail=1; fi
+check  "keygen refuses to replace a key" test -n "$("$BIN" keygen 2>&1 | grep 'already exists')"
 for f in $media_files; do
   echo "--- $f"
   original=$(sha256sum < "$f")

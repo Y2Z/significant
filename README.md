@@ -2,7 +2,6 @@
 
 Sign if I can't. Sign and verify media files in place, with no sidecar files.
 
-    significant keygen
     significant sign video.mp4
     significant verify video.mp4
     significant unsign video.mp4
@@ -37,7 +36,7 @@ only tells you who signed if you know whose it is:
     significant verify video.mp4         # identity: trusted
     significant verify --require-trust video.mp4   # fails unless trusted
 
-`keygen` prints a device's fingerprint. A PEM file can also be a published list of
+`sign` prints a device's fingerprint when it creates the key, and `verify` shows it. A PEM file can also be a published list of
 trusted authorities. The list lives in the key directory.
 
 Trust is about who signed. Whether the content is intact is checked separately.
@@ -73,7 +72,8 @@ own hashing scheme, so other validators should follow the signed manifest.
 
 Early prototype.
 
-- `keygen` creates a key **file**. This is a development stand-in. The private key
+- `sign` creates a key **file** on first use. Losing it means a new identity, so back
+  it up. Use `keygen --force` to replace it. This is a development stand-in. The private key
   is not protected the way phone hardware would protect it. Implement `DeviceKey`
   for Android Keystore or the iOS Secure Enclave.
 - A signature shows that a key signed the bytes. It does not prove that a camera
