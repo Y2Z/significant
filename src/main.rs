@@ -159,10 +159,10 @@ fn print_verification(result: &significant::Verification) {
         Some(id) => println!("signer: sha256:{id}"),
         None => println!("signer: unknown"),
     }
-    if result.trusted {
-        if let Some(name) = &result.claimed_name {
-            println!("name: {name}");
-        }
+    if result.trusted
+        && let Some(name) = &result.claimed_name
+    {
+        println!("name: {name}");
     }
     let identity = match (result.intact, result.trusted) {
         (false, _) => "not checked, content failed",
