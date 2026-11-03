@@ -341,7 +341,10 @@ pub fn manifest_ranges(path: &Path) -> Result<Option<Vec<Range<u64>>>> {
     let found = find_occurrences(&mut file, &store, 2, SCAN_CHUNK)?;
     match found.as_slice() {
         [] => Err(Error::ManifestFragmented(path.to_path_buf())),
-        [start] => Ok(Some(vec![*start..start + store.len() as u64])),
+        [start] => {
+            let manifest = *start..start + store.len() as u64;
+            Ok(Some(vec![manifest]))
+        }
         _ => Err(Error::ManifestAmbiguous(path.to_path_buf())),
     }
 }

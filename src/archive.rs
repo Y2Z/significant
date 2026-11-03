@@ -228,7 +228,7 @@ fn trailer_embed<F: Read + Write + Seek>(
 ) -> Result<Embedded> {
     let start = f.seek(SeekFrom::End(0))?;
     if kind == Kind::Tar {
-        if start < 1024 || start % BLOCK as u64 != 0 {
+        if start < 1024 || !start.is_multiple_of(BLOCK as u64) {
             return Err(ArchiveError::Malformed("not a whole number of TAR blocks"));
         }
         let mut end = [0; 1024];
@@ -249,9 +249,10 @@ fn trailer_embed<F: Read + Write + Seek>(
 
 fn frame_location(kind: Kind, start: u64, payload_len: usize) -> Embedded {
     let payload = start + payload_offset(kind) as u64;
+    let whole_frame = start..start + frame_len(kind, payload_len) as u64;
     Embedded {
         payload: payload..payload + payload_len as u64,
-        exclusions: vec![start..start + frame_len(kind, payload_len) as u64],
+        exclusions: vec![whole_frame],
         kind,
     }
 }
@@ -270,7 +271,7 @@ fn trailer_find<R: Read + Seek>(kind: Kind, r: &mut R) -> Result<Option<Embedded
             continue;
         }
         let candidate = &tail[position..];
-        if kind == Kind::Tar && (base + position as u64) % BLOCK as u64 != 0 {
+        if kind == Kind::Tar && !(base + position as u64).is_multiple_of(BLOCK as u64) {
             continue;
         }
         let Some(len) = frame_payload_len(kind, candidate) else {
