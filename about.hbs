@@ -1,0 +1,23 @@
+Third-party licenses for significant
+
+significant itself is released under the BSD Zero Clause License. The binaries
+also contain the software below, which keeps its own licenses. That includes
+OpenSSL, compiled from the openssl-src crate and licensed under Apache-2.0.
+
+Licenses used:
+{{#each overview}}
+  {{name}} ({{count}})
+{{/each}}
+
+{{#each licenses}}
+================================================================================
+{{name}}
+
+Used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

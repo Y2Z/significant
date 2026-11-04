@@ -1,0 +1,64 @@
+# Builds binaries for each published GitHub release and attaches them to it.
+
+name: CD
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+  TAG: ${{ github.event.release.tag_name }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported Ubuntu keeps the glibc requirement low.
+          - name: significant-linux-x86_64
+            runner: ubuntu-22.04
+          - name: significant-linux-aarch64
+            runner: ubuntu-22.04-arm
+          - name: significant-macos-x86_64
+            runner: macos-15-intel
+          - name: significant-macos-aarch64
+            runner: macos-latest
+          - name: significant-windows-x86_64.exe
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - name: Attach the binary and its checksum to the release
+        shell: bash
+        env:
+          NAME: ${{ matrix.name }}
+        run: |
+          binary=target/release/significant
+          if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
+          "$binary" --version
+          cp "$binary" "$NAME"
+          if command -v sha256sum >/dev/null; then sha256sum "$NAME" > "$NAME.sha256"
+          else shasum -a 256 "$NAME" > "$NAME.sha256"; fi
+          gh release upload "$TAG" "$NAME" "$NAME.sha256" --clobber
+
+  licenses:
+    name: Attach third-party licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - run: cargo about generate --locked --fail about.hbs --output-file THIRD-PARTY-LICENSES.txt
+      - run: gh release upload "$TAG" THIRD-PARTY-LICENSES.txt --clobber

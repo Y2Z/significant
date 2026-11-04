@@ -26,6 +26,17 @@ Sony ARW and Nikon NEF files can only be verified. `c2pa` does not write them, s
 MKV has no C2PA mapping, so `significant` stores the manifest store as a
 Matroska attachment named `significant.c2pa`. Other C2PA tools will not find it.
 
+## Install
+
+Download a binary for Linux, macOS or Windows from the
+[releases page](https://github.com/Y2Z/significant/releases), or use Cargo:
+
+    cargo install significant
+
+On Linux and macOS, make a downloaded binary executable with `chmod +x`. The macOS and
+Windows binaries are not code-signed, so those systems may warn about them. Each release
+includes `THIRD-PARTY-LICENSES.txt`, listing the licenses of the software in the binaries.
+
 ## Key location
 
 Keys and the trust list live in one folder, which is worth backing up:
@@ -124,4 +135,4 @@ privacy-sensitive app may prefer a new key for each file.
 ## License
 
 `significant` is released under the [BSD Zero Clause License](LICENSE).
-Dependencies keep their own licenses.
+Dependencies keep their own licenses, listed in `THIRD-PARTY-LICENSES.txt` on each release.

@@ -66,6 +66,18 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
 
+  licenses:
+    name: Third-party licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - run: cargo about generate --locked --fail about.hbs --output-file THIRD-PARTY-LICENSES.txt
+      - run: test -s THIRD-PARTY-LICENSES.txt
+
   msrv:
     name: Minimum Rust version
     runs-on: ubuntu-latest
