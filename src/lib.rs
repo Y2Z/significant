@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 pub mod archive;
 pub mod keys;
+#[cfg(feature = "mkv")]
 pub mod mkv;
 mod paths;
 pub mod riff;
@@ -19,6 +20,7 @@ pub mod trust;
 pub use keys::{DeviceKey, FileKey};
 pub use trust::{Added, Trust};
 
+#[cfg(feature = "mkv")]
 const MKV_MIME: &str = "video/x-matroska";
 const RAW_STORE_MIME: &str = "application/c2pa";
 
@@ -45,6 +47,7 @@ pub enum Error {
     #[error("C2PA error: {0}")]
     C2pa(#[from] c2pa::Error),
     #[error(transparent)]
+    #[cfg(feature = "mkv")]
     Mkv(#[from] mkv::MkvError),
     #[error(transparent)]
     Archive(#[from] archive::ArchiveError),
@@ -83,12 +86,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// A format `significant` embeds itself because c2pa has no handler for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Carrier {
+    #[cfg(feature = "mkv")]
     Mkv,
     Archive(archive::Kind),
 }
 
 /// Where a carrier put a manifest.
 enum Placement {
+    #[cfg(feature = "mkv")]
     Mkv(mkv::Embedded),
     Archive(archive::Embedded),
 }
@@ -96,6 +101,7 @@ enum Placement {
 impl Placement {
     fn payload(&self) -> Range<u64> {
         match self {
+            #[cfg(feature = "mkv")]
             Self::Mkv(at) => at.payload.clone(),
             Self::Archive(at) => at.payload.clone(),
         }
@@ -103,6 +109,7 @@ impl Placement {
 
     fn exclusions(&self) -> Vec<Range<u64>> {
         match self {
+            #[cfg(feature = "mkv")]
             Self::Mkv(at) => vec![at.payload.clone()],
             Self::Archive(at) => at.exclusions.clone(),
         }
@@ -110,6 +117,7 @@ impl Placement {
 
     fn write(&self, file: &mut File, store: &[u8]) -> Result<()> {
         match self {
+            #[cfg(feature = "mkv")]
             Self::Mkv(at) => mkv::write_payload(file, at, store)?,
             Self::Archive(at) => archive::write_payload(file, at, store)?,
         }
@@ -120,6 +128,7 @@ impl Placement {
 impl Carrier {
     fn embed(self, file: &mut File, bytes: &[u8]) -> Result<Placement> {
         Ok(match self {
+            #[cfg(feature = "mkv")]
             Self::Mkv => Placement::Mkv(mkv::embed_placeholder(file, bytes)?),
             Self::Archive(kind) => {
                 Placement::Archive(archive::embed_placeholder(kind, file, bytes)?)
@@ -129,6 +138,7 @@ impl Carrier {
 
     fn read(self, file: &mut File) -> Result<Option<(Vec<u8>, Placement)>> {
         Ok(match self {
+            #[cfg(feature = "mkv")]
             Self::Mkv => mkv::read_payload(file)?.map(|(store, at)| (store, Placement::Mkv(at))),
             Self::Archive(kind) => archive::read_payload(kind, file)?
                 .map(|(store, at)| (store, Placement::Archive(at))),
@@ -137,6 +147,7 @@ impl Carrier {
 
     fn remove(self, file: &mut File) -> Result<()> {
         match self {
+            #[cfg(feature = "mkv")]
             Self::Mkv => {
                 mkv::remove(file)?;
             }
@@ -152,7 +163,11 @@ fn carrier(path: &Path) -> Option<Carrier> {
     if let Some((kind, _)) = file_name(path).and_then(archive::Kind::from_name) {
         return Some(Carrier::Archive(kind));
     }
-    (media_type(path).ok() == Some(MKV_MIME)).then_some(Carrier::Mkv)
+    #[cfg(feature = "mkv")]
+    if media_type(path).ok() == Some(MKV_MIME) {
+        return Some(Carrier::Mkv);
+    }
+    None
 }
 
 fn file_name(path: &Path) -> Option<&str> {
@@ -600,6 +615,7 @@ fn media_type(path: &Path) -> Result<&'static str> {
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
     match extension.as_deref() {
+        #[cfg(feature = "mkv")]
         Some("mkv") => Ok(MKV_MIME),
         Some("mp4" | "m4v") => Ok("video/mp4"),
         Some("mov") => Ok("video/quicktime"),
@@ -643,6 +659,7 @@ fn replace(output: tempfile::NamedTempFile, path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "mkv")]
     fn element(id: &[u8], data: &[u8]) -> Vec<u8> {
         let mut out = id.to_vec();
         out.push(0x01);
@@ -651,6 +668,7 @@ mod tests {
         out
     }
 
+    #[cfg(feature = "mkv")]
     fn sample_mkv() -> Vec<u8> {
         let mut segment = element(&[0x15, 0x49, 0xA9, 0x66], b"info");
         segment.extend(element(&[0x1F, 0x43, 0xB6, 0x75], &[0x42; 4096]));
@@ -659,6 +677,7 @@ mod tests {
         file
     }
 
+    #[cfg(feature = "mkv")]
     /// Signs like a dishonest key holder choosing their own exclusions.
     fn signed_with(
         exclusions: impl Fn(&Range<u64>) -> Vec<HashRange>,
@@ -681,6 +700,7 @@ mod tests {
         (dir, path, original.len() as u64 - 100)
     }
 
+    #[cfg(feature = "mkv")]
     fn honest(range: &Range<u64>) -> Vec<HashRange> {
         vec![HashRange::new(range.start, range.end - range.start)]
     }
@@ -691,6 +711,7 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
+    #[cfg(feature = "mkv")]
     fn assert_bad_exclusion(path: &Path) {
         let result = verify(path).unwrap().unwrap();
         assert!(!result.intact);
@@ -717,6 +738,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mkv")]
     #[test]
     fn mkv_manifest_range_holds_the_manifest() {
         let (_dir, path, _) = signed_with(honest);
@@ -776,20 +798,23 @@ mod tests {
         assert!(!verify(&path).unwrap().unwrap().intact);
     }
 
-    fn signed_mkv() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    /// A signed TAR, which needs no optional feature.
+    fn signed_sample() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let keys = dir.path().join("keys");
         keys::generate(&keys, false).unwrap();
-        let path = dir.path().join("video.mkv");
-        fs::write(&path, sample_mkv()).unwrap();
+        let path = dir.path().join("sample.tar");
+        let mut tar = vec![0x42; 1024];
+        tar.extend_from_slice(&[0; 1024]);
+        fs::write(&path, tar).unwrap();
         sign(&path, Arc::new(FileKey::load(&keys).unwrap())).unwrap();
         (dir, path, keys)
     }
 
     #[test]
     fn fingerprint_ignores_the_certificate_name() {
-        let (_one, first, _) = signed_mkv();
-        let (_two, second, _) = signed_mkv();
+        let (_one, first, _) = signed_sample();
+        let (_two, second, _) = signed_sample();
         let first = verify(&first).unwrap().unwrap();
         let second = verify(&second).unwrap().unwrap();
         assert_eq!(first.claimed_name, second.claimed_name);
@@ -799,15 +824,15 @@ mod tests {
 
     #[test]
     fn unknown_signer_is_intact_but_not_trusted() {
-        let (_dir, path, _) = signed_mkv();
+        let (_dir, path, _) = signed_sample();
         let result = verify(&path).unwrap().unwrap();
         assert!(result.intact && !result.trusted);
     }
 
     #[test]
     fn trusted_device_is_recognized_and_others_are_not() {
-        let (_one, path, _) = signed_mkv();
-        let (_two, other, _) = signed_mkv();
+        let (_one, path, _) = signed_sample();
+        let (_two, other, _) = signed_sample();
         let list = tempfile::tempdir().unwrap();
         let id = verify(&path).unwrap().unwrap().fingerprint.unwrap();
         assert_eq!(Trust::add(list.path(), &id).unwrap(), Added::Device);
@@ -818,8 +843,8 @@ mod tests {
 
     #[test]
     fn trusted_authority_covers_its_signers_only() {
-        let (_one, path, keys) = signed_mkv();
-        let (_two, other, _) = signed_mkv();
+        let (_one, path, keys) = signed_sample();
+        let (_two, other, _) = signed_sample();
         let list = tempfile::tempdir().unwrap();
         let authority = keys.join("device-ca.pem");
         assert_eq!(
@@ -855,7 +880,7 @@ mod tests {
 
     #[test]
     fn tampered_file_is_never_trusted() {
-        let (_dir, path, _) = signed_mkv();
+        let (_dir, path, _) = signed_sample();
         let list = tempfile::tempdir().unwrap();
         let id = verify(&path).unwrap().unwrap().fingerprint.unwrap();
         Trust::add(list.path(), &id).unwrap();
@@ -865,6 +890,7 @@ mod tests {
         assert!(!result.intact && !result.trusted);
     }
 
+    #[cfg(feature = "mkv")]
     #[test]
     fn honest_mkv_verifies_and_detects_media_change() {
         let (_dir, path, media) = signed_with(honest);
@@ -873,12 +899,14 @@ mod tests {
         assert!(!verify(&path).unwrap().unwrap().intact);
     }
 
+    #[cfg(feature = "mkv")]
     #[test]
     fn exclusion_covering_all_media_is_rejected() {
         let (_dir, path, _) = signed_with(|range| vec![HashRange::new(0, range.end)]);
         assert_bad_exclusion(&path);
     }
 
+    #[cfg(feature = "mkv")]
     #[test]
     fn exclusion_starting_early_is_rejected() {
         let (_dir, path, _) = signed_with(|range| {
@@ -890,6 +918,7 @@ mod tests {
         assert_bad_exclusion(&path);
     }
 
+    #[cfg(feature = "mkv")]
     #[test]
     fn extra_exclusion_range_is_rejected() {
         let (_dir, path, _) = signed_with(|range| {
@@ -900,6 +929,7 @@ mod tests {
         assert_bad_exclusion(&path);
     }
 
+    #[cfg(feature = "mkv")]
     #[test]
     fn manifest_location_other_than_attachment_is_rejected() {
         let (_dir, path, _) =
