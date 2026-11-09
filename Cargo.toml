@@ -16,6 +16,16 @@ path = "src/lib.rs"
 name = "significant"
 path = "src/main.rs"
 
+[[example]]
+name = "mkv_attach"
+required-features = ["mkv"]
+
+[features]
+default = ["mkv"]
+# Signing Matroska video. C2PA defines no MKV embedding, so this is specific to
+# significant and other C2PA tools will not read these signatures.
+mkv = []
+
 [dependencies]
 anyhow = "1"
 c2pa = { version = "0.91.7", features = ["file_io"] }

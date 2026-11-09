@@ -25,6 +25,9 @@ Sony ARW and Nikon NEF files can only be verified. `c2pa` does not write them, s
 
 MKV has no C2PA mapping, so `significant` stores the manifest store as a
 Matroska attachment named `significant.c2pa`. Other C2PA tools will not find it.
+This is the `mkv` feature, on by default. To build without it:
+
+    cargo install significant --no-default-features
 
 ## Install
 
@@ -130,7 +133,8 @@ privacy-sensitive app may prefer a new key for each file.
     cargo build
     scripts/smoke.sh
 
-`examples/mkv_attach.rs` exercises the Matroska layer without C2PA.
+`examples/mkv_attach.rs` exercises the Matroska layer without C2PA. Run
+`cargo test --no-default-features` to test a build without MKV.
 
 ## License
 

@@ -148,8 +148,17 @@ ffmpeg -v error -f lavfi -i testsrc=s=320x240 -frames:v 1 a.png
 ffmpeg -v error -f lavfi -i testsrc=s=320x240 -frames:v 1 a.jpg
 ffmpeg -v error -f lavfi -i sine=d=2 -c:a libmp3lame a.mp3
 
+# MKV support is an optional feature, on by default.
+if "$BIN" verify a.mkv 2>&1 | grep -q 'unsupported file type'; then
+  has_mkv=false
+  echo "skip  MKV support not built"
+else
+  has_mkv=true
+fi
+
 # Makes optional samples. A format that cannot be generated is reported, not failed.
-media_files="a.png a.jpg a.mp4 a.mp3 a.mkv"
+media_files="a.png a.jpg a.mp4 a.mp3"
+if $has_mkv; then media_files="$media_files a.mkv"; else refuse "MKV refused without the feature" "$BIN" sign a.mkv; fi
 sample() {
   name=$1; shift
   if "$@" >/dev/null 2>&1 && [ -s "$name" ]; then
@@ -320,9 +329,7 @@ done
 
 echo "--- trust"
 cp orig-a.png t.png
-cp orig-a.mkv t.mkv
 "$BIN" sign t.png >/dev/null
-"$BIN" sign t.mkv >/dev/null
 "$BIN" --key-dir other keygen >/dev/null
 cp orig-a.png o.png
 "$BIN" --key-dir other sign o.png >/dev/null
@@ -331,7 +338,11 @@ refuse "unknown signer fails --require-trust" "$BIN" verify --require-trust t.pn
 check  "unknown signer stays intact" "$BIN" verify t.png
 check  "trust a device" "$BIN" trust "$fingerprint"
 check  "trusted device passes" "$BIN" verify --require-trust t.png
-check  "trusted device covers MKV" "$BIN" verify --require-trust t.mkv
+if $has_mkv; then
+  cp orig-a.mkv t.mkv
+  "$BIN" sign t.mkv >/dev/null
+  check "trusted device covers MKV" "$BIN" verify --require-trust t.mkv
+fi
 refuse "other device stays unknown" "$BIN" verify --require-trust o.png
 check  "trust an authority" "$BIN" --key-dir list trust other/device-ca.pem
 check  "authority covers its signer" "$BIN" --key-dir list verify --require-trust o.png
